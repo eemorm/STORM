@@ -5,11 +5,9 @@ project('STORM', 'cpp',
 sfml_modules = ['graphics', 'window', 'system']
 sfml_dep = dependency('sfml', modules: sfml_modules, required: true)
 
-srcs = [
-  'src/main.cpp'
-]
+srcs = files('src/main.cpp')
 
 executable('STORM',
            srcs,
            dependencies: [sfml_dep],
-           install : true)
+           install: true)
