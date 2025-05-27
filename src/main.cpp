@@ -21,7 +21,7 @@ private:
 
 public:
     TileMapEditor(int r, int c) : rows(r), cols(c) {
-        grid.resize(rows, std::vector<char>(cols, ' '));
+        grid.resize(rows, std::vector<char>(cols, '.'));  // default empty tile is '.'
         font.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"); // Adjust path if needed
         text.setFont(font);
         text.setCharacterSize(24);
@@ -48,64 +48,86 @@ public:
 
     bool loadFromFile(const std::string& path) {
         std::ifstream inFile(path);
-        if (!inFile.is_open()) {
-            std::cerr << "Failed to open " << path << std::endl;
+        if (!inFile) {
+            std::cerr << "Failed to open " << path << "\n";
             return false;
         }
 
+        // 1) Parse JSON:
         json j;
         try {
             inFile >> j;
         } catch (json::parse_error& e) {
-            std::cerr << "JSON parse error: " << e.what() << std::endl;
+            std::cerr << "JSON parse error: " << e.what() << "\n";
             return false;
         }
 
-        if (!j.is_object() && !j.is_array()) {
-            std::cerr << "Invalid JSON structure: expecting an object or array\n";
-            return false;
-        }
-
-        json tiles;
-
-        if (j.is_object()) {
-            if (!j.contains("tiles") || !j["tiles"].is_array()) {
-                std::cerr << "JSON object does not contain a valid 'tiles' array\n";
-                return false;
-            }
-            tiles = j["tiles"];
+        // 2) Extract the tiles-array, whichever shape it is:
+        json tilesArr;
+        if (j.is_object() && j.contains("tiles") && j["tiles"].is_array()) {
+            tilesArr = j["tiles"];
+        } else if (j.is_array()) {
+            tilesArr = j;
         } else {
-            tiles = j;
-        }
-
-        if (tiles.empty() || !tiles[0].is_array()) {
-            std::cerr << "'tiles' must be a 2D array\n";
+            std::cerr << "Unexpected JSON format—expected array or { tiles: [...] }\n";
             return false;
         }
 
-        rows = tiles.size();
-        cols = tiles[0].size();
-        grid.resize(rows, std::vector<char>(cols));
+        // 3) Build a temporary vector<vector<char>> from that JSON:
+        std::vector<std::vector<char>> tempGrid;
+        tempGrid.reserve(tilesArr.size());
 
-        for (int y = 0; y < rows; ++y) {
-            if (!tiles[y].is_array() || tiles[y].size() != cols) {
-                std::cerr << "Row " << y << " has invalid size or is not an array\n";
+        size_t maxCols = 0;
+        for (const auto& rowJson : tilesArr) {
+            if (!rowJson.is_array()) {
+                std::cerr << "Each row must be an array\n";
                 return false;
             }
-            for (int x = 0; x < cols; ++x) {
-                std::string s = tiles[y][x].get<std::string>();
-                grid[y][x] = s.empty() ? ' ' : s[0];
+
+            std::vector<char> row;
+            row.reserve(rowJson.size());
+            for (const auto& cellJson : rowJson) {
+                if (cellJson.is_string()) {
+                    std::string s = cellJson.get<std::string>();
+                    row.push_back(s.empty() ? '.' : s[0]);
+                } else {
+                    // you could allow numbers, nulls, etc.
+                    row.push_back('.');
+                }
             }
+            maxCols = std::max(maxCols, row.size());
+            tempGrid.push_back(std::move(row));
         }
 
-        std::cout << "Loaded map.json (" << rows << "x" << cols << ")\n";
-        selectedRow = 0;
-        selectedCol = 0;
+        // 4) **Pad** every row so they all have length = maxCols:
+        for (auto& row : tempGrid) {
+            while (row.size() < maxCols)
+                row.push_back('.');   // Default empty tile is '.'
+        }
 
+        // 5) Finally commit into your editor:
+        rows = tempGrid.size();
+        cols = maxCols;
+        grid = std::move(tempGrid);
+        selectedRow = selectedCol = 0;
+
+        std::cout << "Loaded map.json (" << rows << "×" << cols << ")\n";
         return true;
     }
 
     void saveToFile(const std::string& path) {
+        // Determine the correct width
+        int maxCols = 0;
+        for (const auto& row : grid) {
+            if (row.size() > maxCols) maxCols = row.size();
+        }
+
+        // Pad all rows to match the longest one
+        for (auto& row : grid) {
+            while (row.size() < maxCols)
+                row.push_back('.'); // Default tile fill is '.'
+        }
+
         json j = json::array();
         for (const auto& row : grid) {
             json line = json::array();
@@ -117,7 +139,13 @@ public:
         }
 
         std::ofstream outFile(path);
+        if (!outFile) {
+            std::cerr << "Failed to write to file: " << path << "\n";
+            return;
+        }
+
         outFile << j.dump(2);
+        std::cout << "Saved map.json\n";
     }
 
     void draw(sf::RenderWindow& window) {
@@ -133,7 +161,7 @@ public:
 
                 window.draw(rect);
 
-                text.setString(grid[y][x]);
+                text.setString(std::string(1, grid[y][x]));
 
                 sf::FloatRect textBounds = text.getLocalBounds();
                 float textX = x * TILE_SIZE + (TILE_SIZE - textBounds.width) / 2 - textBounds.left;
@@ -153,9 +181,32 @@ public:
     }
 
     void handleChar(char c) {
+        std::cout << "Writing '" << c << "' to tile (" << selectedRow << ", " << selectedCol << ")\n";
         grid[selectedRow][selectedCol] = c;
     }
 };
+
+// Helper function to create an empty map.json file with '.' placeholders
+void createEmptyMapFile(int rows, int cols, const std::string& path = "map.json") {
+    json j = json::array();
+
+    for (int r = 0; r < rows; ++r) {
+        json row = json::array();
+        for (int c = 0; c < cols; ++c) {
+            row.push_back(".");
+        }
+        j.push_back(row);
+    }
+
+    std::ofstream outFile(path);
+    if (!outFile) {
+        std::cerr << "Failed to create " << path << "\n";
+        return;
+    }
+
+    outFile << j.dump(2);
+    std::cout << "Created empty map.json (" << rows << "x" << cols << ") with '.' tiles\n";
+}
 
 int main() {
     std::cout << "STORM - Tilemap Editor\n";
@@ -163,10 +214,11 @@ int main() {
     char choice;
     std::cin >> choice;
 
-    TileMapEditor editor(1, 1);  // Temporary init
+    TileMapEditor* editorPtr = nullptr;
 
     if (choice == 'L' || choice == 'l') {
-        if (!editor.loadFromFile("map.json")) {
+        auto* tempEditor = new TileMapEditor(1, 1); // temp for loading
+        if (!tempEditor->loadFromFile("map.json")) {
             std::cout << "Failed to load map.json. Creating new map.\n";
             int rows, cols;
             std::cout << "Enter number of rows: ";
@@ -181,7 +233,19 @@ int main() {
                 std::cin.clear();
                 std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
             }
-            editor = TileMapEditor(rows, cols);
+
+            createEmptyMapFile(rows, cols, "map.json");
+            delete tempEditor;
+
+            auto* newEditor = new TileMapEditor(rows, cols);
+            if (!newEditor->loadFromFile("map.json")) {
+                std::cerr << "Failed to reload just-created map.json\n";
+                delete newEditor;
+                return 1;
+            }
+            editorPtr = newEditor;
+        } else {
+            editorPtr = tempEditor;
         }
     } else {
         int rows, cols;
@@ -197,8 +261,19 @@ int main() {
             std::cin.clear();
             std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
         }
-        editor = TileMapEditor(rows, cols);
+
+        createEmptyMapFile(rows, cols, "map.json");
+
+        auto* tempEditor = new TileMapEditor(1, 1);
+        if (!tempEditor->loadFromFile("map.json")) {
+            std::cerr << "Failed to reload just-created map.json\n";
+            delete tempEditor;
+            return 1;
+        }
+        editorPtr = tempEditor;
     }
+
+    TileMapEditor& editor = *editorPtr;
 
     sf::RenderWindow window(sf::VideoMode(editor.getCols() * TILE_SIZE, editor.getRows() * TILE_SIZE), "STORM Editor");
 
@@ -217,8 +292,7 @@ int main() {
             } else if (event.type == sf::Event::TextEntered) {
                 if (event.text.unicode >= 32 && event.text.unicode < 128)
                     editor.handleChar(static_cast<char>(event.text.unicode));
-            }
-            else if (event.type == sf::Event::MouseButtonPressed) {
+            } else if (event.type == sf::Event::MouseButtonPressed) {
                 if (event.mouseButton.button == sf::Mouse::Left) {
                     editor.handleMouseClick(event.mouseButton.x, event.mouseButton.y);
                 }
@@ -230,5 +304,6 @@ int main() {
         window.display();
     }
 
+    delete editorPtr;
     return 0;
 }
